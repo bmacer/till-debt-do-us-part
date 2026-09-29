@@ -129,9 +129,18 @@ const freshDebts = () => ([
   { id: 'venue', name: 'The Glasshouse', owner: 'ours', icon: 'columns_fill', orig: 400000, bal: 118000, apr: 0, suggest: 25000, vis: 'full', sub: 'Venue · 0% APR · $250/mo' },
 ]);
 let savedTheme = 'system'; try { savedTheme = localStorage.getItem('tddup-theme') || 'system'; } catch (e) {}
+function freshCheckin() {
+  return [{ sam: '', alex: '' }, { sam: '', alex: '' }, { sam: '', alex: '' }];
+}
+const CHECKIN_QS = [
+  'What felt good about money this week?',
+  'Anything you want to talk through, no pressure?',
+  'One small win to celebrate?',
+];
 const S = {
   wedding: Date.UTC(2027, 4, 22), pendingWedding: Date.UTC(2027, 4, 22), cal: { y: 2027, m: 4 },
   theme: params.get('theme') || savedTheme, tab: 'home', filter: 'all', merged: false,
+  viewer: 'sam', monthly: MONTHLY, checkin: freshCheckin(), checkinTopic: false,
   debts: freshDebts(), shown: null, log: null,
 };
 const debt = id => S.debts.find(d => d.id === id);
@@ -155,9 +164,18 @@ const pct = f => Math.round(f * 100);
 const fmtDate = (t, o) => new Date(t).toLocaleDateString('en-US', { timeZone: 'UTC', ...o });
 const daysUntil = t => Math.round((t - TODAY) / DAY);
 function monthPlus(n) { const m = 8 + n; return { y: 2026 + Math.floor(m / 12), m: m % 12 }; }  // from Sep 2026
+function monthlyAmount() {
+  const n = Math.round(Number(S.monthly) || MONTHLY);
+  return Math.max(20000, Math.min(200000, n));
+}
+function monthlyShares() {
+  const total = monthlyAmount();
+  const sam = Math.floor(total / 2);
+  return { total, sam, alex: total - sam };
+}
 function projection(left = totals().left) {
   if (left <= 0) return { label: 'Today', done: true, y: 2026, m: 8 };
-  const n = Math.ceil(left / MONTHLY - 1e-9), p = monthPlus(n);
+  const n = Math.ceil(left / monthlyAmount() - 1e-9), p = monthPlus(n);
   return { label: `${MONTHS[p.m]} ${p.y}`, ...p };
 }
 function freeNote() {
@@ -170,16 +188,43 @@ function freeNote() {
 }
 const ORDER = ['chase', 'apple', 'loan', 'private', 'venue'];
 const STORE_KEY = 'tddup-ledger';
-const KIND = { mine: ['Mine', 'Sam'], yours: ['Yours', 'Alex'], ours: ['Ours', 'Sam & Alex'] };
 const SEED_BLURB = { chase: '24.99% APR · highest first', apple: '19.24% APR · next highest', loan: 'Balance only · Alex’s', venue: '0% APR · last in line' };
 
 function trimApr(n) {
   return String(Math.round(Number(n) * 100) / 100);
 }
-function isHiddenDebt(d) { return d.owner === 'yours' && d.vis === 'exists'; }
+function viewer() { return S.viewer === 'alex' ? 'alex' : 'sam'; }
+function partnerKey() { return viewer() === 'sam' ? 'alex' : 'sam'; }
+function selfName() { return viewer() === 'sam' ? 'Sam' : 'Alex'; }
+function partnerName() { return partnerKey() === 'sam' ? 'Sam' : 'Alex'; }
+function relOwner(d) {
+  if (d.owner === 'ours') return 'ours';
+  const who = d.owner === 'mine' ? 'sam' : 'alex';
+  return who === viewer() ? 'mine' : 'yours';
+}
+function storedOwner(rel) {
+  if (rel === 'ours') return 'ours';
+  if (viewer() === 'sam') return rel === 'yours' ? 'yours' : 'mine';
+  return rel === 'mine' ? 'yours' : 'mine';
+}
+function seesFully(d) {
+  if (!d || d.owner === 'ours') return !!d;
+  const who = d.owner === 'mine' ? 'sam' : 'alex';
+  return who === viewer();
+}
+function isHiddenDebt(d) { return !seesFully(d) && d.vis === 'exists'; }
+function isBalanceOnly(d) { return !seesFully(d) && d.vis === 'balance'; }
+function kindPair(rel) {
+  if (rel === 'ours') return ['Ours', 'Sam & Alex'];
+  if (rel === 'mine') return ['Mine', selfName()];
+  return ['Yours', partnerName()];
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
 function displayName(d) {
-  if (d.custom && isHiddenDebt(d)) return 'Alex’s private debt';
-  return d.name;
+  if (d.custom && isHiddenDebt(d)) return `${partnerName()}’s private debt`;
+  return esc(d.name);
 }
 function iconFor(name) {
   const n = name.toLowerCase();
@@ -208,9 +253,9 @@ function debtNoun() {
   return `${n} debt${n === 1 ? '' : 's'}`;
 }
 function debtBlurb(d) {
-  if (!S.debts.some(x => x.custom) && SEED_BLURB[d.id]) return SEED_BLURB[d.id];
-  if (d.owner === 'yours' && d.vis === 'balance') return 'Balance only · Alex’s';
-  if (isHiddenDebt(d)) return 'Private · Alex’s';
+  if (viewer() === 'sam' && !S.debts.some(x => x.custom) && SEED_BLURB[d.id]) return SEED_BLURB[d.id];
+  if (isBalanceOnly(d)) return `Balance only · ${partnerName()}’s`;
+  if (isHiddenDebt(d)) return `Private · ${partnerName()}’s`;
   const apr = knownApr(d);
   const label = apr === null ? 'APR not shared' : `${trimApr(apr)}% APR`;
   if (nextUp()?.id === d.id) return apr > 0 ? `${label} · highest first` : `${label} · next up`;
@@ -218,15 +263,23 @@ function debtBlurb(d) {
   return label;
 }
 function debtMeta(d) {
-  if (d.owner === 'yours' && d.vis === 'balance') return `${I('eye_slash', 13, 'var(--ink2)')}Balance only · APR hidden by Alex`;
+  if (isBalanceOnly(d)) return `${I('eye_slash', 13, 'var(--ink2)')}Balance only · APR hidden by ${partnerName()}`;
   if (!d.custom && d.sub) return d.sub;
   const bits = [];
   if (knownApr(d) !== null) bits.push(`${trimApr(d.apr)}% APR`);
   if (d.min) bits.push(`$${d.min} min`);
   let line = bits.join(' · ') || 'No interest listed';
-  if (d.owner === 'mine' && d.vis === 'balance') line += ' · Alex sees the balance';
-  if (d.owner === 'mine' && d.vis === 'exists') line += ' · Alex only knows it exists';
+  if (seesFully(d) && d.owner !== 'ours' && d.vis === 'balance') line += ` · ${partnerName()} sees the balance`;
+  if (seesFully(d) && d.owner !== 'ours' && d.vis === 'exists') line += ` · ${partnerName()} only knows it exists`;
   return line;
+}
+function sanitizeCheckin(raw) {
+  const base = freshCheckin();
+  if (!Array.isArray(raw)) return base;
+  return base.map((row, i) => ({
+    sam: typeof raw[i]?.sam === 'string' ? raw[i].sam.slice(0, 280) : '',
+    alex: typeof raw[i]?.alex === 'string' ? raw[i].alex.slice(0, 280) : '',
+  }));
 }
 function sanitizeDebt(d) {
   if (!d || typeof d.id !== 'string' || typeof d.name !== 'string') return null;
@@ -245,7 +298,12 @@ function sanitizeDebt(d) {
   return out;
 }
 function persist() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify({ v: 1, debts: S.debts, wedding: S.wedding, merged: !!S.merged })); } catch (e) {}
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      v: 1, debts: S.debts, wedding: S.wedding, merged: !!S.merged,
+      viewer: viewer(), monthly: monthlyAmount(), checkin: S.checkin, checkinTopic: !!S.checkinTopic,
+    }));
+  } catch (e) {}
 }
 function loadLedger() {
   try {
@@ -254,7 +312,7 @@ function loadLedger() {
     const data = JSON.parse(raw);
     if (!data || data.v !== 1 || !Array.isArray(data.debts)) return false;
     const debts = data.debts.map(sanitizeDebt).filter(Boolean);
-    if (!debts.length) return false;
+    if (data.debts.length > 0 && !debts.length) return false;
     S.debts = debts;
     if (Number.isFinite(+data.wedding)) {
       S.wedding = S.pendingWedding = +data.wedding;
@@ -262,27 +320,81 @@ function loadLedger() {
       S.cal = { y: when.getUTCFullYear(), m: when.getUTCMonth() };
     }
     S.merged = !!data.merged;
+    if (data.viewer === 'alex' || data.viewer === 'sam') S.viewer = data.viewer;
+    if (Number.isFinite(+data.monthly)) S.monthly = +data.monthly;
+    S.checkin = sanitizeCheckin(data.checkin);
+    S.checkinTopic = !!data.checkinTopic;
     return true;
   } catch (e) { return false; }
 }
-function addDebt(input) {
+function debtFields(input) {
   const name = String(input.name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
   const bal = Math.round(Number(input.balCents));
   if (!name || !Number.isFinite(bal) || bal <= 0 || bal > 99999999) return null;
   let apr = Number(input.apr);
   if (!Number.isFinite(apr)) apr = 0;
   apr = Math.max(0, Math.min(99.99, Math.round(apr * 100) / 100));
-  const owner = ['mine', 'yours', 'ours'].includes(input.owner) ? input.owner : 'mine';
+  const rel = ['mine', 'yours', 'ours'].includes(input.owner) ? input.owner : 'mine';
+  const owner = storedOwner(rel);
   let vis = ['full', 'balance', 'exists'].includes(input.vis) ? input.vis : 'full';
   if (owner === 'ours') vis = 'full';
+  return { name, bal, apr, owner, vis, suggest: Math.min(bal, Math.max(5000, Math.round(bal * 0.08 / 100) * 100)) };
+}
+function addDebt(input) {
+  const fields = debtFields(input);
+  if (!fields) return null;
   const d = {
     id: 'c' + Date.now().toString(36) + Math.floor(Math.random() * 36).toString(36),
-    name, owner, vis, apr, bal, orig: bal, custom: true, icon: iconFor(name),
-    suggest: Math.min(bal, Math.max(5000, Math.round(bal * 0.08 / 100) * 100)),
+    ...fields, orig: fields.bal, custom: true, icon: iconFor(fields.name),
   };
   S.debts.push(d);
   persist();
   return d;
+}
+function updateDebt(id, input) {
+  const d = debt(id);
+  const fields = debtFields(input);
+  if (!d || !fields || !seesFully(d)) return null;
+  d.name = fields.name;
+  d.owner = fields.owner;
+  d.vis = fields.vis;
+  d.apr = fields.apr;
+  d.bal = fields.bal;
+  d.suggest = fields.suggest;
+  if (d.orig < fields.bal) d.orig = fields.bal;
+  if (d.custom) d.icon = iconFor(fields.name);
+  persist();
+  return d;
+}
+function removeDebt(id) {
+  const d = debt(id);
+  if (!d || !seesFully(d)) return false;
+  S.debts = S.debts.filter(x => x.id !== id);
+  persist();
+  return true;
+}
+function setViewer(v) {
+  const next = v === 'alex' ? 'alex' : 'sam';
+  if (viewer() === next) return;
+  S.viewer = next;
+  S.filter = 'all';
+  persist();
+  renderDebts();
+  renderPlan();
+  renderCheckin();
+  updateHome(true);
+  const T = totals();
+  paintHomeValues({ sam: T.sam, alex: T.alex, left: T.left });
+  if (openSheetId === 'settings') renderSettings();
+  toast(I('heart_fill', 17, 'var(--accent)') + `Viewing as ${selfName()}`);
+}
+function bumpMonthly(delta) {
+  const next = Math.max(20000, Math.min(200000, monthlyAmount() + delta));
+  if (next === monthlyAmount()) return;
+  S.monthly = next;
+  persist();
+  renderPlan();
+  updateHome(true);
 }
 
 /* ================= shell ================= */
@@ -478,7 +590,7 @@ function nextCardHTML() {
   <div style="display:flex;align-items:center;gap:12px">
     <div class="sq" style="width:40px;height:40px;flex:none;border-radius:12px;background:var(--${d.owner}t);display:flex;align-items:center;justify-content:center">${I(d.icon, 21, `var(--${d.owner})`)}</div>
     <div style="flex:1;min-width:0">
-      <div style="display:flex;align-items:center;gap:7px"><span style="font-size:17px;font-weight:600;letter-spacing:-.4px">${displayName(d)}</span><span class="chip" style="background:var(--${d.owner}t);color:var(--${d.owner})">${KIND[d.owner][0]}</span></div>
+      <div style="display:flex;align-items:center;gap:7px"><span style="font-size:17px;font-weight:600;letter-spacing:-.4px">${displayName(d)}</span><span class="chip" style="background:var(--${d.owner}t);color:var(--${d.owner})">${kindPair(relOwner(d))[0]}</span></div>
       <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">${sub}</div>
     </div>
     <div class="r" id="h-next-bal" style="font-size:22px;font-weight:700;letter-spacing:-.3px">${money(d.bal)}</div>
@@ -568,7 +680,7 @@ function renderDebts() {
 </div>`;
   $('#d-seg .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
   $$('#d-seg .opt').forEach((b, i) => b.onclick = () => setFilter(b.dataset.f, i));
-  $('#d-add').onclick = () => openSheet('add');
+  $('#d-add').onclick = () => { S.editId = null; openSheet('add'); };
   $('#d-sort').onclick = () => toast(I('sliders', 17, 'var(--accent)') + 'Sorted by payoff order');
   scrollFade('#debts-scroll', '#debts-fade');
   renderDebtList(false);
@@ -588,7 +700,7 @@ function debtRowHTML(d, last) {
   <div style="flex:1;min-width:0">
     <div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:17px;letter-spacing:-.4px;font-weight:500">${displayName(d)}</div>
       <div style="display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:12px;background:var(--neut);font-size:13px;font-weight:600;color:var(--ink2)">${I('lock_fill', 12, 'var(--ink2)')}Private</div></div>
-    <div style="font-size:13px;color:var(--ink2);margin-top:2px;letter-spacing:-.05px">Alex shared that it exists. Details stay private.</div>
+    <div style="font-size:13px;color:var(--ink2);margin-top:2px;letter-spacing:-.05px">${partnerName()} shared that it exists. Details stay private.</div>
   </div>${sep}</button>`;
   }
   const paid = d.bal <= 0, nx = nextUp();
@@ -611,31 +723,37 @@ function debtRowHTML(d, last) {
 }
 function renderDebtList(animate) {
   const T = totals(), f = S.filter, open = S.debts.filter(d => d.bal > 0), paidN = S.debts.length - open.length;
-  const sum = k => S.debts.filter(d => d.owner === k).reduce((a, d) => a + d.bal, 0);
-  const openK = k => S.debts.filter(d => d.owner === k && d.bal > 0).length;
+  const sum = k => S.debts.filter(d => relOwner(d) === k).reduce((a, d) => a + d.bal, 0);
+  const openK = k => S.debts.filter(d => relOwner(d) === k && d.bal > 0).length;
   const big = c => `<span class="r" style="color:var(--ink);font-weight:700">${money(c)}</span>`;
   const subs = {
     all: `${big(T.left)} left across ${open.length} debts · ${paidN} paid off`,
-    mine: `${big(sum('mine'))} left across ${openK('mine')} of Sam’s debts`,
-    yours: `${big(sum('yours'))} left across ${openK('yours')} of Alex’s debts`,
+    mine: `${big(sum('mine'))} left across ${openK('mine')} of ${selfName()}’s debts`,
+    yours: `${big(sum('yours'))} left across ${openK('yours')} of ${partnerName()}’s debts`,
     ours: `${big(sum('ours'))} left, shared 50/50`,
   };
   $('#d-sub').innerHTML = subs[f];
   const kinds = f === 'all' ? ['mine', 'yours', 'ours'] : [f];
-  $('#d-list').innerHTML = kinds.map((k, i) => {
-    const ds = S.debts.filter(d => d.owner === k);
+  const sections = kinds.map((k, i) => {
+    const ds = S.debts.filter(d => relOwner(d) === k);
+    if (!ds.length) return '';
+    const [title, who] = kindPair(k);
     return `<section class="${animate && !REDUCED ? 'sec-in' : ''}" style="animation-delay:${i * 55}ms">
 <div style="display:flex;justify-content:space-between;align-items:baseline;padding:0 20px 7px 20px">
-  <div style="display:flex;align-items:center;gap:8px"><span class="d" style="font-size:20px;font-weight:700;letter-spacing:-.3px">${KIND[k][0]}</span><span style="font-size:13px;color:var(--ink2);font-weight:500">${KIND[k][1]}</span></div>
+  <div style="display:flex;align-items:center;gap:8px"><span class="d" style="font-size:20px;font-weight:700;letter-spacing:-.3px">${title}</span><span style="font-size:13px;color:var(--ink2);font-weight:500">${who}</span></div>
   <div class="r" style="font-size:15px;font-weight:600;color:var(--ink2)">${money(sum(k))}</div>
 </div>
 <div class="card sq" style="margin:0 16px 16px;border-radius:30px;overflow:hidden">${ds.map((d, j) => debtRowHTML(d, j === ds.length - 1)).join('')}</div></section>`;
   }).join('');
+  $('#d-list').innerHTML = sections || `<div class="card sq" style="margin:0 16px 16px;padding:22px 18px;text-align:center;border-radius:30px">
+    <div style="font-size:17px;font-weight:600;letter-spacing:-.3px">Nothing here yet</div>
+    <div style="font-size:14px;color:var(--ink2);margin-top:6px;line-height:19px">Add a debt and it joins the countdown.</div>
+  </div>`;
   $$('#d-list .row').forEach(r => r.onclick = () => {
     const d = debt(r.dataset.id);
     if (isHiddenDebt(d)) openSheet('privacy');
     else if (d.bal > 0) openLog(d.id);
-    else toast(I('check_circle_fill', 17, 'var(--success)', { knock: 'var(--surface)' }) + `${d.name} is paid off`);
+    else toast(I('check_circle_fill', 17, 'var(--success)', { knock: 'var(--surface)' }) + `${displayName(d)} is paid off`);
   });
 }
 
@@ -647,7 +765,7 @@ function renderPlan() {
     const badgeBg = paid ? 'var(--success)' : priv ? 'var(--neut)' : `var(--${d.owner}t)`, badgeFg = paid ? 'var(--surface)' : priv ? 'var(--ink2)' : `var(--${d.owner})`;
     return `<div class="row" style="align-items:center;padding:12px 16px 12px 14px">
       <div class="r" style="width:26px;height:26px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;background:${badgeBg};color:${badgeFg}">${paid ? I('check', 13, 'var(--surface)', { w: 3.4 }) : i + 1}</div>
-      <div style="flex:1;min-width:0;font-size:16px;letter-spacing:-.3px;font-weight:500;display:flex;align-items:center;gap:6px;${paid ? 'color:var(--ink3)' : ''}">${priv ? 'Alex’s private debt' : d.name}${priv ? I('lock_fill', 12, 'var(--ink2)') : ''}</div>
+      <div style="flex:1;min-width:0;font-size:16px;letter-spacing:-.3px;font-weight:500;display:flex;align-items:center;gap:6px;${paid ? 'color:var(--ink3)' : ''}">${priv ? `${partnerName()}’s private debt` : displayName(d)}${priv ? I('lock_fill', 12, 'var(--ink2)') : ''}</div>
       <div class="r" style="font-size:15px;font-weight:600;color:var(--ink2)">${priv ? 'Private' : paid ? 'Paid' : money(d.bal)}</div>
       ${i < a.length - 1 ? '<div class="sep" style="left:54px"></div>' : ''}</div>`;
   }).join('');
@@ -673,33 +791,66 @@ function renderPlan() {
   <div style="display:flex;justify-content:space-between;align-items:baseline;padding:22px 20px 7px">
     <span class="d" style="font-size:20px;font-weight:700;letter-spacing:-.3px">${S.merged ? 'Our payoff order' : 'Payoff order'}</span>
     <span class="r" style="font-size:15px;font-weight:600;color:var(--ink2)">${money(T.left)}</span></div>
-  <div class="card sq" style="margin:0 16px;overflow:hidden">${rows}</div>
+  <div class="card sq" style="margin:0 16px;overflow:hidden">${rows || '<div style="padding:18px 16px;font-size:15px;line-height:20px;color:var(--ink2)">Add a debt and the payoff order appears here.</div>'}</div>
   <div class="card sq" style="margin:16px 16px 0;padding:14px 16px;display:flex;align-items:center;gap:12px">
-    <div class="sq" style="width:38px;height:38px;flex:none;border-radius:11px;background:var(--ourst);display:flex;align-items:center;justify-content:center">${I('calendar', 19, 'var(--ours)')}</div>
-    <div style="flex:1"><div style="font-size:16px;font-weight:600;letter-spacing:-.3px">$720 a month, together</div>
-    <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">Sam $360 · Alex $360 · debt-free by ${projection(T.left).label}</div></div></div>
-  <div style="text-align:center;font-size:12px;color:var(--ink3);margin-top:16px">Plan editing arrives in a later prototype.</div>
+    <button class="press" id="p-down" aria-label="Lower the monthly amount" style="width:36px;height:36px;flex:none;border-radius:18px;background:var(--neut);font-size:22px;line-height:1">−</button>
+    <div style="flex:1"><div style="font-size:16px;font-weight:600;letter-spacing:-.3px">${money(monthlyShares().total)} a month, together</div>
+    <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">Sam ${money(monthlyShares().sam)} · Alex ${money(monthlyShares().alex)} · debt-free by ${projection(T.left).label}</div></div>
+    <button class="press" id="p-up" aria-label="Raise the monthly amount" style="width:36px;height:36px;flex:none;border-radius:18px;background:var(--neut);font-size:22px;line-height:1">+</button></div>
 </div></div><div class="topfade" id="plan-fade"></div>`;
   const pb = $('#p-become'); if (pb) pb.onclick = () => playBecomeOne('plan');
+  $('#p-down').onclick = () => bumpMonthly(-4000);
+  $('#p-up').onclick = () => bumpMonthly(4000);
   scrollFade('#plan-scroll', '#plan-fade');
 }
+function checkinRow(i) {
+  const q = CHECKIN_QS[i];
+  const mine = (S.checkin[i]?.[viewer()] || '').trim();
+  const theirs = (S.checkin[i]?.[partnerKey()] || '').trim();
+  const open = mine && theirs;
+  const mark = mine ? avatar(selfName().slice(0, 1), viewer() === 'sam' ? '#8C3F7F' : '#A8661A', 24, 11) : '';
+  const body = open
+    ? `<div style="margin-top:6px;font-size:14px;line-height:19px;color:var(--ink2)"><b style="color:var(--ink);font-weight:600">${selfName()}</b> ${esc(mine)}</div>
+       <div style="margin-top:4px;font-size:14px;line-height:19px;color:var(--ink2)"><b style="color:var(--ink);font-weight:600">${partnerName()}</b> ${esc(theirs)}</div>`
+    : mine
+      ? `<div style="margin-top:6px;font-size:14px;line-height:19px;color:var(--ink2)">${esc(mine)}</div>`
+      : `<textarea class="ci-field" data-i="${i}" maxlength="280" placeholder="A sentence is enough" aria-label="${esc(q)}"></textarea>`;
+  return `<div class="row" style="padding:14px 16px;align-items:flex-start;gap:12px">
+      <div class="r" style="width:26px;height:26px;flex:none;border-radius:50%;background:var(--minet);color:var(--mine);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;margin-top:1px">${i + 1}</div>
+      <div style="flex:1;font-size:16px;letter-spacing:-.3px;line-height:21px">${q}${body}</div>
+      <div style="display:flex;width:26px;justify-content:flex-end">${mark}</div>
+      ${i < 2 ? '<div class="sep" style="left:54px"></div>' : ''}</div>`;
+}
 function renderCheckin() {
-  const qs = [['What felt good about money this week?', true], ['Anything you want to talk through, no pressure?', true], ['One small win to celebrate?', false]];
+  const pending = CHECKIN_QS.map((_, i) => !(S.checkin[i]?.[viewer()] || '').trim());
+  const anyPending = pending.some(Boolean);
+  const waiting = CHECKIN_QS.some((_, i) => (S.checkin[i]?.[viewer()] || '').trim() && !(S.checkin[i]?.[partnerKey()] || '').trim());
+  const topic = S.checkinTopic ? `<div style="margin:14px 20px 0;font-size:13px;line-height:18px;color:var(--ink2)">A private debt is on the table, if you want it to be.</div>` : '';
+  const note = anyPending
+    ? `You’ll see ${partnerName()}’s answers once you’ve both replied.`
+    : waiting ? `${partnerName()} hasn’t replied yet. Switch to ${partnerName()} in Settings to answer as them.`
+    : 'You’re both in. Nothing here is shared outside the two of you.';
+  const turn = anyPending ? `${selfName()}’s turn` : waiting ? `Waiting on ${partnerName()}` : 'Both replied';
+  const form = anyPending ? `<div style="padding:16px 16px 0"><button class="btn primary press" id="ci-save">Save answers</button></div>` : '';
   $('#v-checkin').innerHTML = `
-<div class="scroller"><div style="position:relative;padding:104px 0 130px">
+<div class="scroller" id="checkin-scroll"><div style="position:relative;padding:104px 0 130px">
   <div class="d" style="padding:0 20px;font-size:34px;font-weight:700;letter-spacing:.3px;line-height:41px">Check-in</div>
-  <div class="num" style="padding:2px 20px 0;font-size:15px;color:var(--ink2);letter-spacing:-.2px">Sunday, Oct 4 · 3 questions, about 5 minutes</div>
-  <div class="card sq" style="margin:18px 16px 0;overflow:hidden">
-  ${qs.map(([q, sam], i) => `<div class="row" style="padding:14px 16px;align-items:center;gap:12px">
-      <div class="r" style="width:26px;height:26px;flex:none;border-radius:50%;background:var(--minet);color:var(--mine);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">${i + 1}</div>
-      <div style="flex:1;font-size:16px;letter-spacing:-.3px;line-height:21px">${q}</div>
-      <div style="display:flex;width:26px;justify-content:flex-end">${sam ? avatar('S', '#8C3F7F', 24, 11) : ''}</div>
-      ${i < 2 ? '<div class="sep" style="left:54px"></div>' : ''}</div>`).join('')}
-  </div>
-  <div style="margin:14px 20px 0;font-size:13px;color:var(--ink2);line-height:18px">You’ll see each other’s answers once you’ve both replied. Alex hasn’t started yet.</div>
-  <div style="padding:18px 16px 0"><button class="btn primary press" id="ci-start">Continue check-in</button></div>
+  <div class="num" style="padding:2px 20px 0;font-size:15px;color:var(--ink2);letter-spacing:-.2px">Sunday, Oct 4 · ${turn}</div>
+  <div class="card sq" style="margin:18px 16px 0;overflow:hidden">${CHECKIN_QS.map((_, i) => checkinRow(i)).join('')}</div>
+  ${topic}
+  <div style="margin:14px 20px 0;font-size:13px;color:var(--ink2);line-height:18px">${note}</div>
+  ${form}
 </div></div>`;
-  $('#ci-start').onclick = () => toast(I('bubbles_fill', 17, 'var(--accent)') + 'Check-ins open Sunday (placeholder)');
+  const save = $('#ci-save');
+  if (save) save.onclick = () => {
+    $$('#v-checkin textarea').forEach(el => {
+      const i = +el.dataset.i;
+      S.checkin[i][viewer()] = el.value.trim().slice(0, 280);
+    });
+    persist();
+    renderCheckin();
+    toast(I('bubbles_fill', 17, 'var(--accent)') + 'Saved your check-in');
+  };
 }
 
 /* ================= sheets ================= */
@@ -773,11 +924,19 @@ function renderLog() {
     <div class="thumb" style="width:calc((100% - 4px)/3);border-radius:15px;transform:translateX(${wi * 100}%)"></div>
     ${who.map(([k, l]) => `<button class="opt${k === S.log.payer ? ' on' : ''}" data-p="${k}" style="border-radius:15px">${l}</button>`).join('')}
   </div>
+  ${seesFully(debt(S.log.id)) ? '<button class="press" id="lg-edit" style="display:block;margin:8px auto 0;font-size:15px;font-weight:600;color:var(--accent)">Edit this debt</button>' : ''}
   <div class="kp">${keys.map(k => `<button class="key${k === '.' || k === 'del' ? ' bare' : ''}" data-k="${k}" aria-label="${k === 'del' ? 'Delete' : k}">${k === 'del' ? I('delete_left', 26, 'var(--ink)') : k}</button>`).join('')}</div>
   </div>`;
   $('#lg-who .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
   $('#lg-close').onclick = () => closeSheet();
   $('#lg-save').onclick = saveLog;
+  const edit = $('#lg-edit');
+  if (edit) edit.onclick = () => {
+    const id = S.log && S.log.id;
+    if (!id || !seesFully(debt(id))) return;
+    closeSheet();
+    later(() => { S.editId = id; openSheet('add'); }, 280);
+  };
   $('#lg-debt').onclick = e => { e.stopPropagation(); toggleMenu(); };
   $$('#lg-who .opt').forEach((b, i) => b.onclick = () => { S.log.payer = b.dataset.p; syncPayer(); updateLog(); });
   $$('#sh-log .key').forEach(b => b.addEventListener('click', () => keyPress(b.dataset.k)));
@@ -803,7 +962,7 @@ function keyPress(k) {
     if (fp === undefined && ip.length >= 5) return bump();
     a += k;
   }
-  if (Math.round(parseFloat(a || '0') * 100) > d.bal) return bump(`Only ${money(d.bal)} left on ${d.name}`);
+  if (Math.round(parseFloat(a || '0') * 100) > d.bal) return bump(`Only ${money(d.bal)} left on ${displayName(d)}`);
   S.log.amt = a; clearTimeout(bumpT); updateLog();
 }
 function bump(msg) {
@@ -813,7 +972,8 @@ function bump(msg) {
 let miniShown = null, miniAnim = [];
 function updateLog() {
   const L = S.log, d = debt(L.id), c = amtCents();
-  $('#lg-debt').innerHTML = `<div class="sq" style="width:24px;height:24px;border-radius:7px;background:var(--${d.owner}t);display:flex;align-items:center;justify-content:center">${I(d.icon, 14, `var(--${d.owner})`)}</div>${d.name} ${I('chev_ud', 13, 'var(--ink2)', { w: 2.6 })}`;
+  const edit = $('#lg-edit'); if (edit) edit.style.display = seesFully(d) ? '' : 'none';
+  $('#lg-debt').innerHTML = `<div class="sq" style="width:24px;height:24px;border-radius:7px;background:var(--${d.owner}t);display:flex;align-items:center;justify-content:center">${I(d.icon, 14, `var(--${d.owner})`)}</div>${displayName(d)} ${I('chev_ud', 13, 'var(--ink2)', { w: 2.6 })}`;
   const raw = L.amt, [ip, fp] = raw.split('.');
   const txt = (ip ? (+ip).toLocaleString('en-US') : '0') + (raw.includes('.') ? '.' + (fp || '') : '');
   const empty = !raw, fs = txt.length > 7 ? 60 : txt.length > 5 ? 68 : 76;
@@ -821,8 +981,8 @@ function updateLog() {
   amt.innerHTML = `<span style="font-size:${Math.round(fs * .53)}px;margin-top:${Math.round(fs * .1)}px;margin-right:2px;color:var(--ink2)">$</span><span style="color:${empty ? 'var(--ink3)' : 'var(--ink)'}">${txt}</span><span class="caret" style="height:${Math.round(fs * .76)}px"></span>`;
   const after = d.bal - c, sug = Math.min(d.bal, d.suggest || 32000);
   $('#lg-hint').innerHTML = empty ? `Suggested this month: <button id="lg-suggest" style="color:var(--accent);font-weight:600">${money(sug)}</button>`
-    : after <= 0 ? `${I('check_circle_fill', 15, 'var(--success)', { knock: 'var(--sheet)' })}That pays off <b style="color:var(--ink);font-weight:600">${d.name}</b>`
-    : `${d.name} drops to <b style="color:var(--ink);font-weight:600">${money(after)}</b>`;
+    : after <= 0 ? `${I('check_circle_fill', 15, 'var(--success)', { knock: 'var(--sheet)' })}That pays off <b style="color:var(--ink);font-weight:600">${displayName(d)}</b>`
+    : `${displayName(d)} drops to <b style="color:var(--ink);font-weight:600">${money(after)}</b>`;
   const sg = $('#lg-suggest'); if (sg) sg.onclick = () => { S.log.amt = String(sug / 100); updateLog(); };
   const before = totals(), T = totals(S.debts.map(x => x.id === d.id ? { ...x, bal: x.bal - c } : x));
   $('#lg-left').textContent = '$' + heroMoney(T.left);
@@ -870,7 +1030,7 @@ function saveLog() {
   const nudge = L.payer === 'sam' ? 'Alex got a nudge' : L.payer === 'alex' ? 'Sam got a nudge' : 'high-fives sent';
   if (S.tab === 'home') later(() => animateHomeTo({ sam: T.sam, alex: T.alex, left: T.left }, { from: { sam: before.sam, alex: before.alex, left: before.left }, heroDur: 1400 }), 420);
   const ok = I('check_circle_fill', 18, 'var(--success)', { knock: 'var(--surface)' });
-  later(() => toast(paidOff ? `${ok}${d.name} is paid off!` : `${ok}Logged ${money(c)} · ${nudge}`), 650);
+  later(() => toast(paidOff ? `${ok}${displayName(d)} is paid off!` : `${ok}Logged ${money(c)} · ${nudge}`), 650);
 }
 document.addEventListener('keydown', e => {
   if (openSheetId === 'log') {
@@ -903,7 +1063,14 @@ function renderSettings() {
   <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px 4px">
     <div style="width:44px"></div><div style="font-size:17px;font-weight:600;letter-spacing:-.4px">Settings</div>
     <button class="gbtn glass press" id="st-close" aria-label="Close">${I('xmark', 19, 'currentColor', { w: 2.4 })}</button></div></div>
-  <div class="eyebrow" style="padding:10px 32px 8px;font-size:11px">Appearance</div>
+  <div class="eyebrow" style="padding:10px 32px 8px;font-size:11px">Viewing as</div>
+  <div class="seg" id="st-who" style="margin:0 16px;height:36px" role="tablist">
+    <div class="thumb" style="width:calc((100% - 4px)/2);transform:translateX(${viewer() === 'alex' ? 100 : 0}%)"></div>
+    <button class="opt${viewer() === 'sam' ? ' on' : ''}" data-v="sam" role="tab">Sam</button>
+    <button class="opt${viewer() === 'alex' ? ' on' : ''}" data-v="alex" role="tab">Alex</button>
+  </div>
+  <div style="font-size:13px;color:var(--ink2);padding:8px 32px 0;line-height:18px">Same plan. ${partnerName()}’s private debts stay private here.</div>
+  <div class="eyebrow" style="padding:18px 32px 8px;font-size:11px">Appearance</div>
   <div class="card sq" style="margin:0 16px;border-radius:26px;padding:6px 0"><div class="appear">
     ${opts.map(([k, l]) => `<button class="opt press${S.theme === k ? ' on' : ''}" data-theme="${k}">
       <div class="mini">${miniPreview(k)}</div><div style="font-size:14px;font-weight:500;letter-spacing:-.2px">${l}</div>
@@ -915,9 +1082,11 @@ function renderSettings() {
     <button class="li" id="st-date" style="width:100%;text-align:left"><div class="lic" style="background:var(--minet)">${I('calendar', 17, 'var(--mine)')}</div><span style="flex:1">Wedding day</span><span style="color:var(--ink2);font-size:16px;margin-right:4px">${fmtDate(S.wedding, { month: 'short', day: 'numeric', year: 'numeric' })}</span>${I('chev_r', 12, 'var(--ink3)', { w: 3 })}</button>
     <button class="li" id="st-reset" style="width:100%;text-align:left"><div class="lic" style="background:var(--neut)">${I('arrow_ccw', 17, 'var(--ink2)')}</div><span style="flex:1">Reset prototype</span></button>
   </div>
-  <div style="text-align:center;font-size:12px;color:var(--ink3);margin-top:14px">Prototype · viewing as Sam</div>
+  <div style="text-align:center;font-size:12px;color:var(--ink3);margin-top:14px">Prototype · viewing as ${selfName()}</div>
   </div>`;
   $('#st-close').onclick = () => closeSheet();
+  $('#st-who .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
+  $$('#st-who .opt').forEach(b => b.onclick = () => setViewer(b.dataset.v));
   $$('#sh-settings .appear .opt').forEach(b => b.onclick = () => { setTheme(b.dataset.theme); renderSettingsRadios(); });
   $('#st-date').onclick = () => { closeSheet(); later(replayOnboarding, 320); };
   $('#st-reset').onclick = () => { closeSheet(); later(resetAll, 320); };
@@ -933,21 +1102,24 @@ function replayOnboarding() {
   requestAnimationFrame(() => { ob.classList.remove('pushed-out'); main.classList.add('pushed-in'); });
 }
 function resetAll() {
-  S.debts = freshDebts(); S.merged = false; S.filter = 'all'; S.wedding = S.pendingWedding = Date.UTC(2027, 4, 22); S.cal = { y: 2027, m: 4 };
+  S.debts = freshDebts(); S.merged = false; S.filter = 'all'; S.viewer = 'sam'; S.monthly = MONTHLY;
+  S.checkin = freshCheckin(); S.checkinTopic = false;
+  S.wedding = S.pendingWedding = Date.UTC(2027, 4, 22); S.cal = { y: 2027, m: 4 };
   persist();
-  renderDebts(); renderPlan(); renderHome(); switchTab('home'); homeIntro();
+  renderDebts(); renderPlan(); renderCheckin(); renderHome(); switchTab('home'); homeIntro();
   toast(I('arrow_ccw', 17, 'var(--accent)') + 'Prototype reset');
 }
 
 /* ---------- privacy explainer ---------- */
 function renderPrivacy() {
-  const pts = [['eye_slash', 'Name, lender, APR and balance stay with Alex'], ['heart_fill', 'Nothing to fix here. Privacy is part of the plan'], ['bubbles_fill', 'Curious? Bring it up in your weekly check-in']];
+  const who = partnerName();
+  const pts = [['eye_slash', `Name, lender, APR and balance stay with ${who}`], ['heart_fill', 'Nothing to fix here. Privacy is part of the plan'], ['bubbles_fill', 'Curious? Bring it up in your weekly check-in']];
   $('#sh-privacy').innerHTML = `<div class="grain"></div><div class="inner" style="padding:0 24px 28px">
   <div class="drag" style="touch-action:none;margin:0 -24px"><div class="grabber"></div>
   <div style="display:flex;justify-content:flex-end;padding:8px 14px 0"><button class="gbtn glass press" id="pv-close" aria-label="Close">${I('xmark', 19, 'currentColor', { w: 2.4 })}</button></div></div>
   <div style="display:flex;justify-content:center;margin-top:-18px"><div class="sq" style="width:64px;height:64px;border-radius:20px;background:var(--neut);display:flex;align-items:center;justify-content:center">${I('lock_fill', 30, 'var(--ink2)')}</div></div>
-  <div class="d" style="text-align:center;font-size:24px;font-weight:700;letter-spacing:-.3px;margin-top:16px;line-height:29px">Alex keeps this one <span class="serif" style="font-weight:400;font-size:29px;color:var(--accent)">private</span></div>
-  <div style="text-align:center;font-size:16px;line-height:22px;color:var(--ink2);margin-top:10px;letter-spacing:-.25px">Alex chose to share that this debt exists, not the details. Its balance still counts toward your shared countdown, so your number stays honest.</div>
+  <div class="d" style="text-align:center;font-size:24px;font-weight:700;letter-spacing:-.3px;margin-top:16px;line-height:29px">${who} keeps this one <span class="serif" style="font-weight:400;font-size:29px;color:var(--accent)">private</span></div>
+  <div style="text-align:center;font-size:16px;line-height:22px;color:var(--ink2);margin-top:10px;letter-spacing:-.25px">${who} chose to share that this debt exists, not the details. Its balance still counts toward your shared countdown, so your number stays honest.</div>
   <div class="sq" style="margin-top:18px;border-radius:20px;background:var(--surface);box-shadow:var(--cardshadow);padding:4px 0">
     ${pts.map(([ic, t], i) => `<div style="display:flex;gap:12px;align-items:center;padding:10px 14px;position:relative">${I(ic, 18, 'var(--accent)')}<span style="font-size:15px;letter-spacing:-.2px;line-height:20px">${t}</span>${i < 2 ? '<div style="position:absolute;left:44px;right:0;bottom:0;height:.5px;background:var(--hair)"></div>' : ''}</div>`).join('')}
   </div>
@@ -955,7 +1127,7 @@ function renderPrivacy() {
   <button class="press" id="pv-ask" style="display:block;margin:14px auto 0;font-size:16px;font-weight:600;color:var(--accent);letter-spacing:-.3px">Add to Sunday’s check-in</button>
   </div>`;
   $('#pv-close').onclick = $('#pv-ok').onclick = () => closeSheet();
-  $('#pv-ask').onclick = () => { closeSheet(); later(() => toast(I('bubbles_fill', 17, 'var(--accent)') + 'Added as a gentle topic for Sunday'), 350); };
+  $('#pv-ask').onclick = () => { S.checkinTopic = true; persist(); closeSheet(); later(() => toast(I('bubbles_fill', 17, 'var(--accent)') + 'Added as a gentle topic for Sunday'), 350); };
 }
 
 /* ---------- toast ---------- */
@@ -1126,6 +1298,9 @@ if (params.get('start') === 'home' || restored) {
   $('#onboarding').style.display = 'none'; const m = $('#main'); m.style.transition = 'none'; m.classList.remove('pushed-in'); m.removeAttribute('aria-hidden');
   void m.offsetWidth; m.style.transition = ''; later(homeIntro, 200);
 }
-window.TD = { $, $$, I, S, money, toast, later, closeSheet, renderDebtList, renderPlan, updateHome, persist, addDebt, displayName, totals, animateHomeTo };
-window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet, payoffOrder, addDebt, animateHomeTo };
+window.TD = {
+  $, $$, I, S, money, toast, later, closeSheet, renderDebtList, renderPlan, renderCheckin, updateHome, persist,
+  addDebt, updateDebt, removeDebt, displayName, totals, animateHomeTo, relOwner, partnerName, seesFully, setViewer,
+};
+window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet, payoffOrder, addDebt, updateDebt, removeDebt, setViewer, animateHomeTo };
 })();

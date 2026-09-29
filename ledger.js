@@ -2,10 +2,23 @@
 'use strict';
 (() => {
   const TD = window.TD;
-  const { $, $$, I, S, toast, later, closeSheet, renderDebtList, renderPlan, updateHome, addDebt, displayName, totals, animateHomeTo } = TD;
+  const { $, $$, I, S, toast, later, closeSheet, renderDebtList, renderPlan, updateHome, addDebt, updateDebt, removeDebt, displayName, totals, animateHomeTo, relOwner, partnerName, seesFully } = TD;
 
   function freshAdd() {
-    return { name: '', bal: '', apr: '', owner: 'mine', vis: 'full', focus: 'bal' };
+    return { name: '', bal: '', apr: '', owner: 'mine', vis: 'full', focus: 'bal', editing: null };
+  }
+  function centsToDraft(c) {
+    const n = Math.abs(Math.round(Number(c) || 0));
+    const whole = Math.floor(n / 100);
+    const frac = n % 100;
+    return frac ? `${whole}.${String(frac).padStart(2, '0')}` : String(whole);
+  }
+  function draftFrom(d) {
+    return {
+      editing: d.id, name: d.name, bal: centsToDraft(d.bal), focus: 'bal',
+      apr: Number.isFinite(+d.apr) ? String(+d.apr) : '',
+      owner: relOwner(d), vis: d.owner === 'ours' ? 'full' : d.vis,
+    };
   }
   function centsOf(raw) {
     const n = parseFloat(raw || '0');
@@ -16,12 +29,13 @@
     return (ip ? (+ip).toLocaleString('en-US') : '0') + (String(raw || '').includes('.') ? '.' + (fp || '') : '');
   }
   function visCopy(a) {
+    const who = partnerName();
     if (a.owner === 'ours') return { title: 'Shared', help: 'You both see the name, the balance, and the APR.' };
-    const alex = a.owner === 'mine';
-    const title = alex ? 'What Alex sees' : 'What you see';
-    if (a.vis === 'full') return { title, help: alex ? 'Alex sees the name, the balance, and the APR.' : 'You see the name, the balance, and the APR.' };
-    if (a.vis === 'balance') return { title, help: alex ? 'Alex sees the balance. The name and APR stay with you.' : 'You see the balance. Alex kept the name and APR private.' };
-    return { title, help: alex ? 'Alex sees that it exists. The details stay with you, and the balance still counts.' : 'You see that it exists. Alex kept the details private, and the balance still counts.' };
+    const mine = a.owner === 'mine';
+    const title = mine ? `What ${who} sees` : 'What you see';
+    if (a.vis === 'full') return { title, help: mine ? `${who} sees the name, the balance, and the APR.` : 'You see the name, the balance, and the APR.' };
+    if (a.vis === 'balance') return { title, help: mine ? `${who} sees the balance. The name and APR stay with you.` : `You see the balance. ${who} kept the name and APR private.` };
+    return { title, help: mine ? `${who} sees that it exists. The details stay with you, and the balance still counts.` : `You see that it exists. ${who} kept the details private, and the balance still counts.` };
   }
   function paintSave() {
     const ready = S.add && S.add.name.trim() && centsOf(S.add.bal) > 0;
@@ -97,10 +111,13 @@
     const balCents = centsOf(a.bal);
     if (balCents <= 0) { S.add.focus = 'bal'; paintAdd(); shake('#ad-bal'); return; }
     const shownBefore = totals();
-    const d = addDebt({ name: a.name, balCents, apr: a.apr === '' ? 0 : parseFloat(a.apr), owner: a.owner, vis: a.vis });
+    const payload = { name: a.name, balCents, apr: a.apr === '' ? 0 : parseFloat(a.apr), owner: a.owner, vis: a.vis };
+    const d = a.editing ? updateDebt(a.editing, payload) : addDebt(payload);
     if (!d) return;
+    const verb = a.editing ? 'Updated' : 'Added';
     closeSheet();
     S.add = null;
+    S.editId = null;
     renderDebtList(true);
     renderPlan();
     updateHome(true);
@@ -108,16 +125,17 @@
       const T = totals();
       later(() => animateHomeTo({ sam: T.sam, alex: T.alex, left: T.left }, { from: { sam: shownBefore.sam, alex: shownBefore.alex, left: shownBefore.left }, heroDur: 1400 }), 420);
     }
-    later(() => toast(`${I('check_circle_fill', 18, 'var(--success)', { knock: 'var(--surface)' })}Added ${displayName(d)}`), 350);
+    later(() => toast(`${I('check_circle_fill', 18, 'var(--success)', { knock: 'var(--surface)' })}${verb} ${displayName(d)}`), 350);
   }
   function renderAdd() {
-    S.add = freshAdd();
+    const existing = S.editId && S.debts.find(d => d.id === S.editId);
+    S.add = existing && seesFully(existing) ? draftFrom(existing) : freshAdd();
     const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'del'];
     $('#sh-add').innerHTML = `<div class="grain"></div><div class="inner">
       <div class="drag" style="touch-action:none"><div class="grabber"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px 0">
           <button class="gbtn glass press" id="ad-close" aria-label="Cancel">${I('xmark', 19, 'currentColor', { w: 2.4 })}</button>
-          <div style="font-size:17px;font-weight:600;letter-spacing:-.4px">Add a debt</div>
+          <div style="font-size:17px;font-weight:600;letter-spacing:-.4px">${S.add.editing ? 'Edit debt' : 'Add a debt'}</div>
           <button class="gbtn press" id="ad-save" aria-label="Save" style="background:var(--primary);box-shadow:inset 0 .5px 0 rgba(255,255,255,.3),0 4px 12px -4px rgba(91,42,87,.6);opacity:.38">${I('check', 20, 'var(--onprimary)', { w: 3 })}</button>
         </div>
       </div>
@@ -131,23 +149,38 @@
         <div class="eyebrow add-label">Whose</div>
         <div class="seg" id="ad-owner" style="margin:0 16px;height:36px" role="tablist">
           <div class="thumb" style="width:calc((100% - 4px)/3)"></div>
-          ${[['mine', 'Mine'], ['yours', 'Yours'], ['ours', 'Ours']].map(([k, l]) => `<button class="opt${k === 'mine' ? ' on' : ''}" data-o="${k}" role="tab">${l}</button>`).join('')}
+          ${[['mine', 'Mine'], ['yours', 'Yours'], ['ours', 'Ours']].map(([k, l]) => `<button class="opt${k === S.add.owner ? ' on' : ''}" data-o="${k}" role="tab">${l}</button>`).join('')}
         </div>
         <div id="ad-vis-block">
-          <div class="eyebrow add-label" id="ad-vis-title">What Alex sees</div>
+          <div class="eyebrow add-label" id="ad-vis-title">What ${partnerName()} sees</div>
           <div class="seg" id="ad-vis" style="margin:0 16px;height:36px" role="tablist">
             <div class="thumb" style="width:calc((100% - 4px)/3)"></div>
-            ${[['full', 'All'], ['balance', 'Balance'], ['exists', 'Exists']].map(([k, l]) => `<button class="opt${k === 'full' ? ' on' : ''}" data-v="${k}" role="tab">${l}</button>`).join('')}
+            ${[['full', 'All'], ['balance', 'Balance'], ['exists', 'Exists']].map(([k, l]) => `<button class="opt${k === S.add.vis ? ' on' : ''}" data-v="${k}" role="tab">${l}</button>`).join('')}
           </div>
         </div>
         <div class="add-help" id="ad-help"></div>
+        ${S.add.editing ? '<button class="press" id="ad-remove" style="display:block;margin:4px auto 8px;font-size:15px;font-weight:600;color:var(--ink2)">Remove debt</button>' : ''}
       </div>
       <div class="kp tight">${keys.map(k => `<button class="key${k === '.' || k === 'del' ? ' bare' : ''}" data-k="${k}" aria-label="${k === 'del' ? 'Delete' : k}">${k === 'del' ? I('delete_left', 22, 'var(--ink)') : k}</button>`).join('')}</div>
     </div>`;
     $('#ad-owner .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
     $('#ad-vis .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
-    $('#ad-close').onclick = () => { S.add = null; closeSheet(); };
+    $('#ad-close').onclick = () => { S.add = null; S.editId = null; closeSheet(); };
     $('#ad-save').onclick = trySave;
+    $('#ad-name').value = S.add.name;
+    const remove = $('#ad-remove');
+    if (remove) remove.onclick = () => {
+      const id = S.add && S.add.editing;
+      const label = S.add ? S.add.name : 'Debt';
+      if (!id || !removeDebt(id)) return;
+      closeSheet();
+      S.add = null;
+      S.editId = null;
+      renderDebtList(false);
+      renderPlan();
+      updateHome(true);
+      later(() => toast(`${I('xmark', 16, 'var(--ink2)')}Removed ${label}`), 280);
+    };
     $('#ad-name').addEventListener('input', e => { S.add.name = e.target.value; paintSave(); });
     $('#ad-name').addEventListener('focus', () => { S.add.focus = 'name'; paintAdd(); });
     $('#ad-bal').onclick = () => { $('#ad-name').blur(); S.add.focus = 'bal'; paintAdd(); };
@@ -160,7 +193,7 @@
   function onAddKey(e) {
     if (!S.add) return;
     const typing = document.activeElement && document.activeElement.id === 'ad-name';
-    if (e.key === 'Escape') { e.preventDefault(); S.add = null; closeSheet(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); S.add = null; S.editId = null; closeSheet(); return; }
     if (typing) {
       if (e.key === 'Enter') { e.preventDefault(); trySave(); }
       return;
