@@ -143,7 +143,8 @@ function totals(debts = S.debts) {
     else { so += d.orig / 2; sb += d.bal / 2; ao += d.orig / 2; ab += d.bal / 2; }
   }
   const orig = so + ao, left = sb + ab;
-  return { sam: (so - sb) / so, alex: (ao - ab) / ao, left, orig, paid: orig - left, together: (orig - left) / orig };
+  const ratio = (paid, base) => base > 0 ? (base - paid) / base : 0;
+  return { sam: ratio(sb, so), alex: ratio(ab, ao), left, orig, paid: orig - left, together: orig > 0 ? (orig - left) / orig : 0 };
 }
 const money = (c, { cents = 'auto' } = {}) => {
   const d = c / 100, showC = cents === true || (cents === 'auto' && Math.round(c) % 100 !== 0);
@@ -168,8 +169,121 @@ function freeNote() {
   const k = pi - wi; return `<span style="color:var(--ink2);display:inline-flex;gap:4px;align-items:center">${I('calendar', 13, 'var(--ink2)')}${k} month${k > 1 ? 's' : ''} after “I do”</span>`;
 }
 const ORDER = ['chase', 'apple', 'loan', 'private', 'venue'];
-const nextUp = () => ORDER.map(debt).find(d => d.bal > 0 && d.vis !== 'exists');
+const STORE_KEY = 'tddup-ledger';
 const KIND = { mine: ['Mine', 'Sam'], yours: ['Yours', 'Alex'], ours: ['Ours', 'Sam & Alex'] };
+const SEED_BLURB = { chase: '24.99% APR · highest first', apple: '19.24% APR · next highest', loan: 'Balance only · Alex’s', venue: '0% APR · last in line' };
+
+function trimApr(n) {
+  return String(Math.round(Number(n) * 100) / 100);
+}
+function isHiddenDebt(d) { return d.owner === 'yours' && d.vis === 'exists'; }
+function displayName(d) {
+  if (d.custom && isHiddenDebt(d)) return 'Alex’s private debt';
+  return d.name;
+}
+function iconFor(name) {
+  const n = name.toLowerCase();
+  if (/dental|medic|doctor|health|hospital|clinic/.test(n)) return 'cross_fill';
+  if (/student|tuition|school|college|grad/.test(n)) return 'gradcap_fill';
+  if (/venue|wedding|rent|mortgage|house|home|landlord/.test(n)) return 'columns_fill';
+  return 'creditcard_fill';
+}
+function knownApr(d) { return Number.isFinite(+d.apr) ? +d.apr : null; }
+/* Seed debts keep their designed order. Added debts slot in by APR. */
+function payoffOrder() {
+  const list = ORDER.map(debt).filter(Boolean);
+  const added = S.debts.filter(d => d.custom)
+    .sort((a, b) => (knownApr(b) ?? -1) - (knownApr(a) ?? -1) || a.name.localeCompare(b.name));
+  for (const d of added) {
+    const value = knownApr(d) ?? -1;
+    let idx = list.findIndex(x => { const xa = knownApr(x); return xa !== null && xa < value; });
+    if (idx < 0) idx = list.length;
+    list.splice(idx, 0, d);
+  }
+  return list;
+}
+const nextUp = () => payoffOrder().find(d => d.bal > 0 && !isHiddenDebt(d));
+function debtNoun() {
+  const n = payoffOrder().length;
+  return `${n} debt${n === 1 ? '' : 's'}`;
+}
+function debtBlurb(d) {
+  if (!S.debts.some(x => x.custom) && SEED_BLURB[d.id]) return SEED_BLURB[d.id];
+  if (d.owner === 'yours' && d.vis === 'balance') return 'Balance only · Alex’s';
+  if (isHiddenDebt(d)) return 'Private · Alex’s';
+  const apr = knownApr(d);
+  const label = apr === null ? 'APR not shared' : `${trimApr(apr)}% APR`;
+  if (nextUp()?.id === d.id) return apr > 0 ? `${label} · highest first` : `${label} · next up`;
+  if (apr === 0) return '0% APR · last in line';
+  return label;
+}
+function debtMeta(d) {
+  if (d.owner === 'yours' && d.vis === 'balance') return `${I('eye_slash', 13, 'var(--ink2)')}Balance only · APR hidden by Alex`;
+  if (!d.custom && d.sub) return d.sub;
+  const bits = [];
+  if (knownApr(d) !== null) bits.push(`${trimApr(d.apr)}% APR`);
+  if (d.min) bits.push(`$${d.min} min`);
+  let line = bits.join(' · ') || 'No interest listed';
+  if (d.owner === 'mine' && d.vis === 'balance') line += ' · Alex sees the balance';
+  if (d.owner === 'mine' && d.vis === 'exists') line += ' · Alex only knows it exists';
+  return line;
+}
+function sanitizeDebt(d) {
+  if (!d || typeof d.id !== 'string' || typeof d.name !== 'string') return null;
+  const owner = ['mine', 'yours', 'ours'].includes(d.owner) ? d.owner : null;
+  const vis = ['full', 'balance', 'exists'].includes(d.vis) ? d.vis : null;
+  if (!owner || !vis) return null;
+  const bal = Math.max(0, Math.round(Number(d.bal) || 0));
+  const orig = Math.max(bal, Math.round(Number(d.orig) || 0));
+  const out = { id: d.id.slice(0, 40), name: String(d.name).slice(0, 40), owner, vis, bal, orig, icon: ICONS[d.icon] ? d.icon : 'creditcard_fill' };
+  if (Number.isFinite(+d.apr)) out.apr = Math.round(+d.apr * 100) / 100;
+  if (Number.isFinite(+d.min)) out.min = +d.min;
+  if (Number.isFinite(+d.suggest)) out.suggest = +d.suggest;
+  if (typeof d.sub === 'string') out.sub = d.sub.slice(0, 80);
+  if (typeof d.paidOn === 'string') out.paidOn = d.paidOn.slice(0, 24);
+  if (d.custom) out.custom = true;
+  return out;
+}
+function persist() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify({ v: 1, debts: S.debts, wedding: S.wedding, merged: !!S.merged })); } catch (e) {}
+}
+function loadLedger() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (!data || data.v !== 1 || !Array.isArray(data.debts)) return false;
+    const debts = data.debts.map(sanitizeDebt).filter(Boolean);
+    if (!debts.length) return false;
+    S.debts = debts;
+    if (Number.isFinite(+data.wedding)) {
+      S.wedding = S.pendingWedding = +data.wedding;
+      const when = new Date(S.wedding);
+      S.cal = { y: when.getUTCFullYear(), m: when.getUTCMonth() };
+    }
+    S.merged = !!data.merged;
+    return true;
+  } catch (e) { return false; }
+}
+function addDebt(input) {
+  const name = String(input.name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  const bal = Math.round(Number(input.balCents));
+  if (!name || !Number.isFinite(bal) || bal <= 0 || bal > 99999999) return null;
+  let apr = Number(input.apr);
+  if (!Number.isFinite(apr)) apr = 0;
+  apr = Math.max(0, Math.min(99.99, Math.round(apr * 100) / 100));
+  const owner = ['mine', 'yours', 'ours'].includes(input.owner) ? input.owner : 'mine';
+  let vis = ['full', 'balance', 'exists'].includes(input.vis) ? input.vis : 'full';
+  if (owner === 'ours') vis = 'full';
+  const d = {
+    id: 'c' + Date.now().toString(36) + Math.floor(Math.random() * 36).toString(36),
+    name, owner, vis, apr, bal, orig: bal, custom: true, icon: iconFor(name),
+    suggest: Math.min(bal, Math.max(5000, Math.round(bal * 0.08 / 100) * 100)),
+  };
+  S.debts.push(d);
+  persist();
+  return d;
+}
 
 /* ================= shell ================= */
 stage.innerHTML = `
@@ -191,6 +305,7 @@ stage.innerHTML = `
 </div>
 <div class="dimmer" id="dimmer"></div>
 <div class="sheet" id="sh-log" style="top:118px" role="dialog" aria-label="Log a payment"></div>
+<div class="sheet" id="sh-add" style="top:64px" role="dialog" aria-label="Add a debt"></div>
 <div class="sheet" id="sh-settings" role="dialog" aria-label="Settings"></div>
 <div class="sheet" id="sh-privacy" role="dialog" aria-label="Private debt"></div>
 <div id="become" aria-hidden="true"></div>
@@ -285,6 +400,7 @@ function pickDate(t) {
 }
 function finishOnboarding() {
   S.wedding = S.pendingWedding;
+  persist();
   updateHome(false);
   const ob = $('#onboarding'), main = $('#main');
   main.removeAttribute('aria-hidden');
@@ -355,19 +471,19 @@ function renderHome() {
 function nextCardHTML() {
   const d = nextUp();
   if (!d) return `<div style="display:flex;align-items:center;gap:12px">${I('check_circle_fill', 28, 'var(--success)', { knock: 'var(--surface)' })}<div style="font-size:17px;font-weight:600">Everything’s paid. <span class="serif" style="font-weight:400;font-size:20px">Debt Do Us Part.</span></div></div>`;
-  const sub = { chase: '24.99% APR · highest first', apple: '19.24% APR · next highest', loan: 'Balance only · Alex’s', venue: '0% APR · last in line' }[d.id];
+  const sub = debtBlurb(d);
   const step = d.suggest || 32000, pay = Math.min(d.bal, step), by = monthPlus(Math.max(1, Math.ceil(d.bal / step - 1e-9)));
   const line = d.bal <= pay ? `Pay <b class="num" style="font-weight:600">${money(pay)}</b> this month and it’s gone.` : `Pay <b class="num" style="font-weight:600">${money(pay)}</b> this month and it’s gone by ${MONTHS[by.m]}.`;
   return `
   <div style="display:flex;align-items:center;gap:12px">
     <div class="sq" style="width:40px;height:40px;flex:none;border-radius:12px;background:var(--${d.owner}t);display:flex;align-items:center;justify-content:center">${I(d.icon, 21, `var(--${d.owner})`)}</div>
     <div style="flex:1;min-width:0">
-      <div style="display:flex;align-items:center;gap:7px"><span style="font-size:17px;font-weight:600;letter-spacing:-.4px">${d.name}</span><span class="chip" style="background:var(--${d.owner}t);color:var(--${d.owner})">${KIND[d.owner][0]}</span></div>
+      <div style="display:flex;align-items:center;gap:7px"><span style="font-size:17px;font-weight:600;letter-spacing:-.4px">${displayName(d)}</span><span class="chip" style="background:var(--${d.owner}t);color:var(--${d.owner})">${KIND[d.owner][0]}</span></div>
       <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">${sub}</div>
     </div>
     <div class="r" id="h-next-bal" style="font-size:22px;font-weight:700;letter-spacing:-.3px">${money(d.bal)}</div>
   </div>
-  <div style="height:6px;border-radius:3px;background:var(--${d.owner}t);margin-top:13px;overflow:hidden"><div id="h-next-bar" style="width:${((d.orig - d.bal) / d.orig * 100).toFixed(1)}%;height:100%;border-radius:3px;background:var(--${d.owner});transition:width 1s var(--ease-out)"></div></div>
+  <div style="height:6px;border-radius:3px;background:var(--${d.owner}t);margin-top:13px;overflow:hidden"><div id="h-next-bar" style="width:${d.orig > 0 ? ((d.orig - d.bal) / d.orig * 100).toFixed(1) : 0}%;height:100%;border-radius:3px;background:var(--${d.owner});transition:width 1s var(--ease-out)"></div></div>
   <div style="font-size:15px;letter-spacing:-.2px;margin-top:10px;line-height:20px">${line}</div>
   <button class="btn primary press" id="h-log" style="margin-top:13px;height:48px;border-radius:24px">${I('plus', 17, 'var(--onprimary)', { w: 2.8 })}Log a payment</button>`;
 }
@@ -378,10 +494,10 @@ function becomeCardHTML() {
   return S.merged
     ? `<div style="position:relative;width:52px;height:52px;flex:none">${fusedMini(6, 8)}</div><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">ONE PLAN · SINCE TODAY</div>
       <div style="font-size:17px;font-weight:600;letter-spacing:-.4px;margin-top:3px">Two plans, <span class="serif" style="font-size:21px;font-weight:400;color:#F3B596">now one.</span></div>
-      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">5 debts, one payoff order. Split 50/50.</div></div>${chev}`
+      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">${debtNoun()}, one payoff order. Split 50/50.</div></div>${chev}`
     : `<div style="position:relative;width:52px;height:52px;flex:none">${twoMini(34, 5, 18)}</div><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">MILESTONE READY</div>
       <div style="font-size:17px;font-weight:600;letter-spacing:-.4px;margin-top:3px">Become <span class="serif" style="font-size:21px;font-weight:400;color:#F3B596">one plan?</span></div>
-      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">Merge 5 debts into one order. Optional.</div></div>${chev}`;
+      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">Merge ${debtNoun()} into one order. Optional.</div></div>${chev}`;
 }
 function updateHome(paintNow = true) {
   const T = totals(), w = S.wedding, days = daysUntil(w);
@@ -401,7 +517,8 @@ function paintHomeValues(v) {
   $('#h-hero').textContent = heroMoney(v.left);
   $('#h-sam').textContent = pct(Math.max(0, Math.min(1, v.sam))) + '%'; $('#h-alex').textContent = pct(Math.max(0, Math.min(1, v.alex))) + '%';
   const paid = Math.max(0, T.orig - v.left);
-  $('#h-paid').textContent = `${money(Math.round(paid / 100) * 100)} of ${money(T.orig)} paid · ${pct(paid / T.orig)}% together`;
+  const together = T.orig > 0 ? pct(paid / T.orig) : 0;
+  $('#h-paid').textContent = `${money(Math.round(paid / 100) * 100)} of ${money(T.orig)} paid · ${together}% together`;
   S.shown = { sam: v.sam, alex: v.alex, left: v.left };
 }
 let homeAnims = [];
@@ -451,7 +568,7 @@ function renderDebts() {
 </div>`;
   $('#d-seg .thumb').style.transition = `transform var(--sp-snappy-d) var(--sp-snappy)`;
   $$('#d-seg .opt').forEach((b, i) => b.onclick = () => setFilter(b.dataset.f, i));
-  $('#d-add').onclick = () => toast(I('info', 17, 'var(--accent)') + 'Adding debts comes in the next build');
+  $('#d-add').onclick = () => openSheet('add');
   $('#d-sort').onclick = () => toast(I('sliders', 17, 'var(--accent)') + 'Sorted by payoff order');
   scrollFade('#debts-scroll', '#debts-fade');
   renderDebtList(false);
@@ -465,11 +582,11 @@ function setFilter(f, i) {
 }
 function debtRowHTML(d, last) {
   const k = d.owner, sep = last ? '' : '<div class="sep"></div>';
-  if (d.vis === 'exists') {
+  if (isHiddenDebt(d)) {
     return `<button class="row tap" data-id="${d.id}" style="width:100%;text-align:left;padding:12px 16px 13px 14px;align-items:center">
   <div class="sq" style="width:38px;height:38px;flex:none;border-radius:11px;background:var(--neut);display:flex;align-items:center;justify-content:center">${I('lock_fill', 18, 'var(--ink2)')}</div>
   <div style="flex:1;min-width:0">
-    <div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:17px;letter-spacing:-.4px;font-weight:500">${d.name}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:17px;letter-spacing:-.4px;font-weight:500">${displayName(d)}</div>
       <div style="display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:12px;background:var(--neut);font-size:13px;font-weight:600;color:var(--ink2)">${I('lock_fill', 12, 'var(--ink2)')}Private</div></div>
     <div style="font-size:13px;color:var(--ink2);margin-top:2px;letter-spacing:-.05px">Alex shared that it exists. Details stay private.</div>
   </div>${sep}</button>`;
@@ -478,16 +595,15 @@ function debtRowHTML(d, last) {
   const nextchip = nx && nx.id === d.id ? '<span class="nextchip">NEXT</span>' : '';
   let sub;
   if (paid) sub = `${I('check_circle_fill', 13, 'var(--success)', { knock: 'var(--surface)' })}<span style="color:var(--success);font-weight:500">Paid off ${d.paidOn}</span>&nbsp;· ${money(d.orig)}`;
-  else if (d.vis === 'balance') sub = `${I('eye_slash', 13, 'var(--ink2)')}Balance only · APR hidden by Alex`;
-  else sub = d.sub || `${d.apr}% APR · $${d.min} min`;
+  else sub = debtMeta(d);
   const trail = paid ? `<div class="r" style="font-size:17px;font-weight:600;color:var(--ink3)">$0</div>` : `<div class="r" style="font-size:17px;font-weight:600;letter-spacing:-.2px">${money(d.bal)}</div>`;
-  const bar = paid ? '' : `<div class="bar" style="background:var(--${k}t)"><i style="width:${((d.orig - d.bal) / d.orig * 100).toFixed(1)}%;background:var(--${k})"></i></div>`;
+  const bar = paid ? '' : `<div class="bar" style="background:var(--${k}t)"><i style="width:${d.orig > 0 ? ((d.orig - d.bal) / d.orig * 100).toFixed(1) : 0}%;background:var(--${k})"></i></div>`;
   const isz = ['cross_fill', 'columns_fill', 'gradcap_fill'].includes(d.icon) ? 19 : 21;
   return `<button class="row${paid ? '' : ' tap'}" data-id="${d.id}" style="width:100%;text-align:left">
   <div class="sq" style="width:38px;height:38px;flex:none;border-radius:11px;background:var(--${k}t);display:flex;align-items:center;justify-content:center;margin-top:1px">${I(d.icon, isz, `var(--${k})`)}</div>
   <div style="flex:1;min-width:0">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-      <div style="font-size:17px;letter-spacing:-.4px;font-weight:500;white-space:nowrap;display:flex;align-items:center;gap:6px">${d.name}${nextchip}</div>${trail}
+      <div style="font-size:17px;letter-spacing:-.4px;font-weight:500;white-space:nowrap;display:flex;align-items:center;gap:6px">${displayName(d)}${nextchip}</div>${trail}
     </div>
     <div class="num" style="font-size:13px;color:var(--ink2);margin-top:2px;letter-spacing:-.05px;display:flex;align-items:center;gap:4px;white-space:nowrap">${sub}</div>
     ${bar}
@@ -517,7 +633,7 @@ function renderDebtList(animate) {
   }).join('');
   $$('#d-list .row').forEach(r => r.onclick = () => {
     const d = debt(r.dataset.id);
-    if (d.vis === 'exists') openSheet('privacy');
+    if (isHiddenDebt(d)) openSheet('privacy');
     else if (d.bal > 0) openLog(d.id);
     else toast(I('check_circle_fill', 17, 'var(--success)', { knock: 'var(--surface)' }) + `${d.name} is paid off`);
   });
@@ -526,8 +642,8 @@ function renderDebtList(animate) {
 /* ================= plan + check-in (placeholders) ================= */
 function renderPlan() {
   const T = totals();
-  const rows = ORDER.map(debt).map((d, i, a) => {
-    const paid = d.bal <= 0, priv = d.vis === 'exists';
+  const rows = payoffOrder().map((d, i, a) => {
+    const paid = d.bal <= 0, priv = isHiddenDebt(d);
     const badgeBg = paid ? 'var(--success)' : priv ? 'var(--neut)' : `var(--${d.owner}t)`, badgeFg = paid ? 'var(--surface)' : priv ? 'var(--ink2)' : `var(--${d.owner})`;
     return `<div class="row" style="align-items:center;padding:12px 16px 12px 14px">
       <div class="r" style="width:26px;height:26px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;background:${badgeBg};color:${badgeFg}">${paid ? I('check', 13, 'var(--surface)', { w: 3.4 }) : i + 1}</div>
@@ -547,7 +663,7 @@ function renderPlan() {
           <div><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">MILESTONE · OPTIONAL</div>
           <div class="d" style="font-size:22px;font-weight:700;margin-top:4px;letter-spacing:-.3px">Ready to <span class="serif" style="font-weight:400;font-size:26px;color:#F3B596">become one?</span></div></div>
         </div>
-        <div style="font-size:14px;line-height:19px;color:rgba(251,245,240,.8);margin-top:10px;letter-spacing:-.15px">Merge your 5 debts into one payoff order. You can always keep separate plans.</div>
+        <div style="font-size:14px;line-height:19px;color:rgba(251,245,240,.8);margin-top:10px;letter-spacing:-.15px">Merge your ${debtNoun()} into one payoff order. You can always keep separate plans.</div>
         <button class="btn press" id="p-become" style="margin-top:14px;height:46px;border-radius:23px;background:#FBF5F0;color:#5B2A57">Become One</button></div>`;
   $('#v-plan').innerHTML = `
 <div class="scroller" id="plan-scroll"><div style="position:relative;padding:104px 0 130px">
@@ -592,6 +708,7 @@ function openSheet(id) {
   if (openSheetId) closeSheet();
   if (id === 'settings') renderSettings();
   if (id === 'privacy') renderPrivacy();
+  if (id === 'add' && window.TD.renderAdd) window.TD.renderAdd();
   openSheetId = id;
   const sh = $(`#sh-${id}`);
   $('#dimmer').classList.add('on');
@@ -618,7 +735,7 @@ function enableDrag(sh) {
   };
   sh.addEventListener('pointerup', end); sh.addEventListener('pointercancel', end);
 }
-['log', 'settings', 'privacy'].forEach(k => enableDrag($(`#sh-${k}`)));
+['log', 'settings', 'privacy', 'add'].forEach(k => enableDrag($(`#sh-${k}`)));
 
 /* ---------- log a payment ---------- */
 const payerFor = d => d.owner === 'yours' ? 'alex' : d.owner === 'ours' ? 'both' : 'sam';
@@ -727,10 +844,10 @@ function updateLog() {
 function toggleMenu() {
   const m = $('#lg-menu');
   if (m.classList.contains('on')) return closeMenu();
-  const list = ORDER.map(debt).filter(d => d.bal > 0 && d.vis !== 'exists');
+  const list = payoffOrder().filter(d => d.bal > 0 && !isHiddenDebt(d));
   m.innerHTML = list.map(d => `<button class="mi" data-id="${d.id}" style="width:100%;text-align:left">
     <span style="width:18px;display:flex">${d.id === S.log.id ? I('check', 16, 'var(--accent)', { w: 3 }) : ''}</span>
-    <span style="flex:1">${d.name}</span><span class="r" style="color:var(--ink2);font-size:15px">${money(d.bal)}</span></button>`).join('');
+    <span style="flex:1">${displayName(d)}</span><span class="r" style="color:var(--ink2);font-size:15px">${money(d.bal)}</span></button>`).join('');
   $$('.mi', m).forEach(b => b.onclick = e => {
     e.stopPropagation(); const d = debt(b.dataset.id); S.log.id = d.id; S.log.payer = payerFor(d);
     if (amtCents() > d.bal) S.log.amt = String(d.bal / 100);
@@ -746,6 +863,7 @@ function saveLog() {
   const before = totals();
   d.bal = Math.max(0, d.bal - c);
   const paidOff = d.bal === 0; if (paidOff) d.paidOn = 'Sep 28';
+  persist();
   const T = totals();
   closeSheet(); S.log = null;
   renderDebtList(false); renderPlan(); updateHome(true);
@@ -760,7 +878,8 @@ document.addEventListener('keydown', e => {
     else if (e.key === 'Backspace') { keyPress('del'); flashKey('del'); }
     else if (e.key === 'Enter') saveLog();
     else if (e.key === 'Escape') closeSheet();
-  } else if (e.key === 'Escape') closeSheet();
+  } else if (openSheetId === 'add') window.TD.onAddKey?.(e);
+  else if (e.key === 'Escape') closeSheet();
 });
 function flashKey(k) { const b = $(`#sh-log .key[data-k="${k}"]`); if (!b) return; b.classList.add('down'); later(() => b.classList.remove('down'), 120); }
 
@@ -815,6 +934,7 @@ function replayOnboarding() {
 }
 function resetAll() {
   S.debts = freshDebts(); S.merged = false; S.filter = 'all'; S.wedding = S.pendingWedding = Date.UTC(2027, 4, 22); S.cal = { y: 2027, m: 4 };
+  persist();
   renderDebts(); renderPlan(); renderHome(); switchTab('home'); homeIntro();
   toast(I('arrow_ccw', 17, 'var(--accent)') + 'Prototype reset');
 }
@@ -895,7 +1015,7 @@ function renderBecome() {
   <div class="d bo-fade" style="font-size:38px;font-weight:700;letter-spacing:.2px;line-height:44px;margin-top:14px">Two plans,</div>
   <div class="serif bo-fade" style="font-size:54px;line-height:48px;color:#F3B596;margin-top:-2px">now one.</div>
   <div class="bo-fade" style="font-size:16px;line-height:23px;color:rgba(251,245,240,.80);margin:16px auto 0;width:318px;letter-spacing:-.25px">
-    You merged 5 debts into one payoff order. Contributions stay 50/50, and you can change that anytime.</div>
+    You merged ${debtNoun()} into one payoff order. Contributions stay 50/50, and you can change that anytime.</div>
 </div>
 <button class="btn press bo-fade" id="bo-plan" style="position:absolute;z-index:4;left:24px;right:24px;width:auto;bottom:98px;height:54px;border-radius:27px;background:#FBF5F0;color:#5B2A57;box-shadow:0 10px 30px -10px rgba(0,0,0,.45),inset 0 -1px 0 rgba(91,42,87,.08)">See our plan</button>
 <button class="press bo-fade" id="bo-keep" style="position:absolute;z-index:4;left:60px;right:60px;bottom:44px;height:40px;text-align:center;font-size:16px;font-weight:600;color:#F3B596;letter-spacing:-.3px">Not yet? Keep separate</button>`;
@@ -968,7 +1088,7 @@ function closeBecome(merge) {
   boTimers.forEach(clearTimeout); boTimers = [];
   const ov = $('#become'); ov.classList.remove('on'); ov.setAttribute('aria-hidden', 'true'); stage.classList.remove('on-plum');
   later(() => { if (!ov.classList.contains('on')) ov.innerHTML = ''; }, 520);
-  if (merge) { S.merged = true; renderPlan(); updateHome(false); switchTab('plan'); later(() => toast(I('heart_fill', 17, '#B45FA4') + 'One plan. Nicely done, you two.'), 450); }
+  if (merge) { S.merged = true; persist(); renderPlan(); updateHome(false); switchTab('plan'); later(() => toast(I('heart_fill', 17, '#B45FA4') + 'One plan. Nicely done, you two.'), 450); }
   else later(() => toast(I('heart_fill', 17, 'var(--accent)') + 'Separate plans it is. Merge anytime.'), 450);
 }
 
@@ -999,11 +1119,13 @@ function fit() {
 addEventListener('resize', fit); fit();
 
 /* ================= boot ================= */
+const restored = loadLedger();
 applyTheme(false);
 renderOnboarding(); renderHome(); renderDebts(); renderPlan(); renderCheckin();
-if (params.get('start') === 'home') {
+if (params.get('start') === 'home' || restored) {
   $('#onboarding').style.display = 'none'; const m = $('#main'); m.style.transition = 'none'; m.classList.remove('pushed-in'); m.removeAttribute('aria-hidden');
   void m.offsetWidth; m.style.transition = ''; later(homeIntro, 200);
 }
-window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet };
+window.TD = { $, $$, I, S, money, toast, later, closeSheet, renderDebtList, renderPlan, updateHome, persist, addDebt, displayName, totals, animateHomeTo };
+window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet, payoffOrder, addDebt, animateHomeTo };
 })();
