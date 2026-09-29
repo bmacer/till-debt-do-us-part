@@ -140,7 +140,7 @@ const CHECKIN_QS = [
 const S = {
   wedding: Date.UTC(2027, 4, 22), pendingWedding: Date.UTC(2027, 4, 22), cal: { y: 2027, m: 4 },
   theme: params.get('theme') || savedTheme, tab: 'home', filter: 'all', merged: false,
-  viewer: 'sam', monthly: MONTHLY, checkin: freshCheckin(), checkinTopic: false,
+  viewer: 'sam', monthly: MONTHLY, samShare: null, payments: [], checkin: freshCheckin(), checkinTopic: false,
   debts: freshDebts(), shown: null, log: null,
 };
 const debt = id => S.debts.find(d => d.id === id);
@@ -168,10 +168,21 @@ function monthlyAmount() {
   const n = Math.round(Number(S.monthly) || MONTHLY);
   return Math.max(20000, Math.min(200000, n));
 }
+const SHARE_STEP = 2000;
+function samShare() {
+  const total = monthlyAmount();
+  const set = S.samShare !== null && S.samShare !== undefined && Number.isFinite(+S.samShare);
+  const raw = set ? Math.round(+S.samShare) : Math.floor(total / 2);
+  return Math.max(0, Math.min(total, raw));
+}
 function monthlyShares() {
   const total = monthlyAmount();
-  const sam = Math.floor(total / 2);
+  const sam = samShare();
   return { total, sam, alex: total - sam };
+}
+function splitPhrase() {
+  const { sam, alex } = monthlyShares();
+  return sam === alex ? `Even split · ${money(sam)} each` : `Sam ${money(sam)} · Alex ${money(alex)}`;
 }
 function projection(left = totals().left) {
   if (left <= 0) return { label: 'Today', done: true, y: 2026, m: 8 };
@@ -301,7 +312,8 @@ function persist() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       v: 1, debts: S.debts, wedding: S.wedding, merged: !!S.merged,
-      viewer: viewer(), monthly: monthlyAmount(), checkin: S.checkin, checkinTopic: !!S.checkinTopic,
+      viewer: viewer(), monthly: monthlyAmount(), samShare: samShare(), payments: S.payments,
+      checkin: S.checkin, checkinTopic: !!S.checkinTopic,
     }));
   } catch (e) {}
 }
@@ -322,6 +334,8 @@ function loadLedger() {
     S.merged = !!data.merged;
     if (data.viewer === 'alex' || data.viewer === 'sam') S.viewer = data.viewer;
     if (Number.isFinite(+data.monthly)) S.monthly = +data.monthly;
+    S.samShare = Number.isFinite(+data.samShare) ? Math.round(+data.samShare) : null;
+    S.payments = sanitizePayments(data.payments);
     S.checkin = sanitizeCheckin(data.checkin);
     S.checkinTopic = !!data.checkinTopic;
     return true;
@@ -389,12 +403,50 @@ function setViewer(v) {
   toast(I('heart_fill', 17, 'var(--accent)') + `Viewing as ${selfName()}`);
 }
 function bumpMonthly(delta) {
-  const next = Math.max(20000, Math.min(200000, monthlyAmount() + delta));
-  if (next === monthlyAmount()) return;
+  const prev = monthlyAmount();
+  const next = Math.max(20000, Math.min(200000, prev + delta));
+  if (next === prev) return;
+  const ratio = prev > 0 ? samShare() / prev : 0.5;
   S.monthly = next;
+  S.samShare = Math.max(0, Math.min(next, Math.round(next * ratio / SHARE_STEP) * SHARE_STEP));
   persist();
   renderPlan();
   updateHome(true);
+}
+function bumpShare(delta) {
+  const total = monthlyAmount();
+  const next = Math.max(0, Math.min(total, samShare() + delta));
+  if (next === samShare()) return;
+  S.samShare = next;
+  persist();
+  renderPlan();
+  updateHome(true);
+}
+function sanitizePayments(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 30).map(p => {
+    if (!p || typeof p.debtId !== 'string') return null;
+    const cents = Math.round(Number(p.cents));
+    const payer = ['sam', 'alex', 'both'].includes(p.payer) ? p.payer : null;
+    if (!payer || !Number.isFinite(cents) || cents <= 0 || cents > 99999999) return null;
+    return { debtId: p.debtId.slice(0, 40), cents, payer, at: Number.isFinite(+p.at) ? +p.at : TODAY };
+  }).filter(Boolean);
+}
+function logPayment(d, cents, payer) {
+  S.payments.unshift({ debtId: d.id, cents, payer, at: TODAY });
+  S.payments = S.payments.slice(0, 30);
+}
+function paymentTitle(p) {
+  const d = debt(p.debtId);
+  if (d && isHiddenDebt(d)) return `${partnerName()}’s private debt`;
+  if (d && isBalanceOnly(d)) return `${partnerName()}’s debt`;
+  if (d) return displayName(d);
+  return 'Paid off';
+}
+function payerLabel(payer) {
+  if (payer === 'both') return 'Both paid';
+  if (payer === 'sam') return 'Sam paid';
+  return 'Alex paid';
 }
 
 /* ================= shell ================= */
@@ -606,7 +658,7 @@ function becomeCardHTML() {
   return S.merged
     ? `<div style="position:relative;width:52px;height:52px;flex:none">${fusedMini(6, 8)}</div><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">ONE PLAN · SINCE TODAY</div>
       <div style="font-size:17px;font-weight:600;letter-spacing:-.4px;margin-top:3px">Two plans, <span class="serif" style="font-size:21px;font-weight:400;color:#F3B596">now one.</span></div>
-      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">${debtNoun()}, one payoff order. Split 50/50.</div></div>${chev}`
+      <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">${debtNoun()}, one payoff order. ${splitPhrase()}.</div></div>${chev}`
     : `<div style="position:relative;width:52px;height:52px;flex:none">${twoMini(34, 5, 18)}</div><div style="flex:1;min-width:0"><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">MILESTONE READY</div>
       <div style="font-size:17px;font-weight:600;letter-spacing:-.4px;margin-top:3px">Become <span class="serif" style="font-size:21px;font-weight:400;color:#F3B596">one plan?</span></div>
       <div style="font-size:13px;color:rgba(251,245,240,.75);margin-top:2px">Merge ${debtNoun()} into one order. Optional.</div></div>${chev}`;
@@ -774,7 +826,7 @@ function renderPlan() {
         <div style="position:relative;width:64px;height:64px;flex:none">${fusedMini(0, 10)}</div>
         <div><div style="font-size:11px;font-weight:600;letter-spacing:1.6px;color:#F3B596">ONE PLAN · MERGED TODAY</div>
         <div class="d" style="font-size:22px;font-weight:700;margin-top:4px;letter-spacing:-.3px">Two plans, <span class="serif" style="font-weight:400;font-size:26px;color:#F3B596">now one.</span></div>
-        <div style="font-size:13px;color:rgba(251,245,240,.78);margin-top:3px">Contributions stay 50/50. Change it anytime.</div></div></div>`
+        <div style="font-size:13px;color:rgba(251,245,240,.78);margin-top:3px">${splitPhrase()}. Change either share below.</div></div></div>`
     : `<div class="sq" style="border-radius:30px;background:#5B2A57;color:#FBF5F0;padding:18px;position:relative;overflow:hidden">
         <div style="display:flex;gap:14px;align-items:center">
           <div style="position:relative;width:64px;height:48px;flex:none">${twoMini(44, 6, 20)}</div>
@@ -783,24 +835,44 @@ function renderPlan() {
         </div>
         <div style="font-size:14px;line-height:19px;color:rgba(251,245,240,.8);margin-top:10px;letter-spacing:-.15px">Merge your ${debtNoun()} into one payoff order. You can always keep separate plans.</div>
         <button class="btn press" id="p-become" style="margin-top:14px;height:46px;border-radius:23px;background:#FBF5F0;color:#5B2A57">Become One</button></div>`;
+  const shares = monthlyShares();
+  const stepBtn = (id, label, sign, off) => `<button class="press" id="${id}" aria-label="${label}"${off ? ' disabled' : ''} style="width:36px;height:36px;flex:none;border-radius:18px;background:var(--neut);font-size:22px;line-height:1;opacity:${off ? .35 : 1}">${sign}</button>`;
+  const payRows = S.payments.slice(0, 6).map((p, i, a) => {
+    const hidden = debt(p.debtId) && isHiddenDebt(debt(p.debtId));
+    return `<div class="row" style="align-items:center;padding:12px 16px">
+      <div style="flex:1;min-width:0"><div style="font-size:16px;font-weight:500;letter-spacing:-.3px">${paymentTitle(p)}</div>
+      <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">${payerLabel(p.payer)} · ${fmtDate(p.at, { month: 'short', day: 'numeric' })}</div></div>
+      <div class="r" style="font-size:15px;font-weight:600;color:var(--ink2)">${hidden ? 'Private' : money(p.cents)}</div>
+      ${i < a.length - 1 ? '<div class="sep" style="left:16px"></div>' : ''}</div>`;
+  }).join('');
   $('#v-plan').innerHTML = `
 <div class="scroller" id="plan-scroll"><div style="position:relative;padding:104px 0 130px">
   <div class="d" style="padding:0 20px;font-size:34px;font-weight:700;letter-spacing:.3px;line-height:41px">Plan</div>
   <div class="num" style="padding:2px 20px 0;font-size:15px;color:var(--ink2);letter-spacing:-.2px">Avalanche · highest APR first</div>
   <div style="margin:18px 16px 0">${hero}</div>
+  <div class="card sq" style="margin:16px 16px 0;padding:14px 16px;display:flex;align-items:center;gap:12px">
+    ${stepBtn('p-down', 'Lower the monthly amount', '−', shares.total <= 20000)}
+    <div style="flex:1"><div style="font-size:16px;font-weight:600;letter-spacing:-.3px">${money(shares.total)} a month, together</div>
+    <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">${splitPhrase()} · debt-free by ${projection(T.left).label}</div></div>
+    ${stepBtn('p-up', 'Raise the monthly amount', '+', shares.total >= 200000)}</div>
+  <div class="card sq" style="margin:10px 16px 0;padding:14px 16px;display:flex;align-items:center;gap:12px">
+    ${stepBtn('s-down', 'Lower Sam’s share', '−', shares.sam <= 0)}
+    <div style="flex:1"><div style="font-size:16px;font-weight:600;letter-spacing:-.3px">Sam’s share ${money(shares.sam)}</div>
+    <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">Alex covers ${money(shares.alex)}</div></div>
+    ${stepBtn('s-up', 'Raise Sam’s share', '+', shares.alex <= 0)}</div>
   <div style="display:flex;justify-content:space-between;align-items:baseline;padding:22px 20px 7px">
     <span class="d" style="font-size:20px;font-weight:700;letter-spacing:-.3px">${S.merged ? 'Our payoff order' : 'Payoff order'}</span>
     <span class="r" style="font-size:15px;font-weight:600;color:var(--ink2)">${money(T.left)}</span></div>
   <div class="card sq" style="margin:0 16px;overflow:hidden">${rows || '<div style="padding:18px 16px;font-size:15px;line-height:20px;color:var(--ink2)">Add a debt and the payoff order appears here.</div>'}</div>
-  <div class="card sq" style="margin:16px 16px 0;padding:14px 16px;display:flex;align-items:center;gap:12px">
-    <button class="press" id="p-down" aria-label="Lower the monthly amount" style="width:36px;height:36px;flex:none;border-radius:18px;background:var(--neut);font-size:22px;line-height:1">−</button>
-    <div style="flex:1"><div style="font-size:16px;font-weight:600;letter-spacing:-.3px">${money(monthlyShares().total)} a month, together</div>
-    <div class="num" style="font-size:13px;color:var(--ink2);margin-top:1px">Sam ${money(monthlyShares().sam)} · Alex ${money(monthlyShares().alex)} · debt-free by ${projection(T.left).label}</div></div>
-    <button class="press" id="p-up" aria-label="Raise the monthly amount" style="width:36px;height:36px;flex:none;border-radius:18px;background:var(--neut);font-size:22px;line-height:1">+</button></div>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;padding:22px 20px 7px">
+    <span class="d" style="font-size:20px;font-weight:700;letter-spacing:-.3px">Payments</span></div>
+  <div class="card sq" style="margin:0 16px;overflow:hidden">${payRows || '<div style="padding:16px;font-size:15px;line-height:20px;color:var(--ink2)">Logged payments land here, for both of you.</div>'}</div>
 </div></div><div class="topfade" id="plan-fade"></div>`;
   const pb = $('#p-become'); if (pb) pb.onclick = () => playBecomeOne('plan');
   $('#p-down').onclick = () => bumpMonthly(-4000);
   $('#p-up').onclick = () => bumpMonthly(4000);
+  $('#s-down').onclick = () => bumpShare(-SHARE_STEP);
+  $('#s-up').onclick = () => bumpShare(SHARE_STEP);
   scrollFade('#plan-scroll', '#plan-fade');
 }
 function checkinRow(i) {
@@ -1023,6 +1095,7 @@ function saveLog() {
   const before = totals();
   d.bal = Math.max(0, d.bal - c);
   const paidOff = d.bal === 0; if (paidOff) d.paidOn = 'Sep 28';
+  logPayment(d, c, L.payer);
   persist();
   const T = totals();
   closeSheet(); S.log = null;
@@ -1103,6 +1176,7 @@ function replayOnboarding() {
 }
 function resetAll() {
   S.debts = freshDebts(); S.merged = false; S.filter = 'all'; S.viewer = 'sam'; S.monthly = MONTHLY;
+  S.samShare = null; S.payments = [];
   S.checkin = freshCheckin(); S.checkinTopic = false;
   S.wedding = S.pendingWedding = Date.UTC(2027, 4, 22); S.cal = { y: 2027, m: 4 };
   persist();
@@ -1187,7 +1261,7 @@ function renderBecome() {
   <div class="d bo-fade" style="font-size:38px;font-weight:700;letter-spacing:.2px;line-height:44px;margin-top:14px">Two plans,</div>
   <div class="serif bo-fade" style="font-size:54px;line-height:48px;color:#F3B596;margin-top:-2px">now one.</div>
   <div class="bo-fade" style="font-size:16px;line-height:23px;color:rgba(251,245,240,.80);margin:16px auto 0;width:318px;letter-spacing:-.25px">
-    You merged ${debtNoun()} into one payoff order. Contributions stay 50/50, and you can change that anytime.</div>
+    You merged ${debtNoun()} into one payoff order. ${splitPhrase()} each month.</div>
 </div>
 <button class="btn press bo-fade" id="bo-plan" style="position:absolute;z-index:4;left:24px;right:24px;width:auto;bottom:98px;height:54px;border-radius:27px;background:#FBF5F0;color:#5B2A57;box-shadow:0 10px 30px -10px rgba(0,0,0,.45),inset 0 -1px 0 rgba(91,42,87,.08)">See our plan</button>
 <button class="press bo-fade" id="bo-keep" style="position:absolute;z-index:4;left:60px;right:60px;bottom:44px;height:40px;text-align:center;font-size:16px;font-weight:600;color:#F3B596;letter-spacing:-.3px">Not yet? Keep separate</button>`;
@@ -1302,5 +1376,5 @@ window.TD = {
   $, $$, I, S, money, toast, later, closeSheet, renderDebtList, renderPlan, renderCheckin, updateHome, persist,
   addDebt, updateDebt, removeDebt, displayName, totals, animateHomeTo, relOwner, partnerName, seesFully, setViewer,
 };
-window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet, payoffOrder, addDebt, updateDebt, removeDebt, setViewer, animateHomeTo };
+window.__proto = { S, totals, switchTab, openLog, playBecomeOne, setTheme, openSheet, closeSheet, payoffOrder, addDebt, updateDebt, removeDebt, setViewer, animateHomeTo, bumpShare, saveLog };
 })();
